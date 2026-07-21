@@ -1,0 +1,294 @@
+
+let registeredMediaButtons = [];
+
+/** Registers a media button for extensions. 'mediaTypes' filters by type eg ['audio'], null means all. 'isDefault' promotes to visible (vs More dropdown). 'showInHistory' controls whether button appears in the History panel. */
+function registerMediaButton(name, action, title = '', mediaTypes = null, isDefault = false, showInHistory = true, href = null, is_download = false, can_multi = false, multi_only = false, max_selected = null) {
+    registeredMediaButtons.push({ name, action, title, mediaTypes, isDefault, showInHistory, href, is_download, can_multi, multi_only, max_selected });
+}
+
+function listOutputHistoryFolderAndFiles(path, isRefresh, callback, depth) {
+    let sortBy = localStorage.getItem('image_history_sort_by') ?? 'Name';
+    let reverse = localStorage.getItem('image_history_sort_reverse') == 'true';
+    let allowAnims = localStorage.getItem('image_history_allow_anims') != 'false';
+    let sortElem = document.getElementById('image_history_sort_by');
+    let sortReverseElem = document.getElementById('image_history_sort_reverse');
+    let allowAnimsElem = document.getElementById('image_history_allow_anims');
+    let fix = null;
+    if (sortElem) {
+        sortBy = sortElem.value;
+        reverse = sortReverseElem.checked;
+        allowAnims = allowAnimsElem.checked;
+    }
+    else { // first call happens before headers are built atm
+        fix = () => {
+            let sortElem = document.getElementById('image_history_sort_by');
+            let sortReverseElem = document.getElementById('image_history_sort_reverse');
+            let allowAnimsElem = document.getElementById('image_history_allow_anims');
+            sortElem.value = sortBy;
+            sortReverseElem.checked = reverse;
+            sortElem.addEventListener('change', () => {
+                localStorage.setItem('image_history_sort_by', sortElem.value);
+                imageHistoryBrowser.lightRefresh();
+            });
+            sortReverseElem.addEventListener('change', () => {
+                localStorage.setItem('image_history_sort_reverse', sortReverseElem.checked);
+                imageHistoryBrowser.lightRefresh();
+            });
+            allowAnimsElem.addEventListener('change', () => {
+                localStorage.setItem('image_history_allow_anims', allowAnimsElem.checked);
+                imageHistoryBrowser.lightRefresh();
+            });
+        }
+    }
+    let prefix = path == '' ? '' : (path.endsWith('/') ? path : `${path}/`);
+    genericRequest('ListImages', {'path': path, 'depth': depth, 'sortBy': sortBy, 'sortReverse': reverse}, data => {
+        let folders = data.folders.sort((a, b) => b.toLowerCase().localeCompare(a.toLowerCase()));
+        function isPreSortFile(f) {
+            return f.src == 'index.html'; // Grid index files
+        }
+        let preFiles = data.files.filter(f => isPreSortFile(f));
+        let postFiles = data.files.filter(f => !isPreSortFile(f));
+        data.files = preFiles.concat(postFiles);
+        let mapped = data.files.map(f => {
+            let fullSrc = `${prefix}${f.src}`;
+            return { 'name': fullSrc, 'data': { 'src': `${getImageOutPrefix()}/${fullSrc}`, 'fullsrc': fullSrc, 'name': f.src, 'metadata': interpretMetadata(f.metadata) } };
+        });
+        callback(folders, mapped);
+        if (fix) {
+            fix();
+        }
+    });
+}
+
+function buttonsForImage(fullsrc, src, metadata, isCurrentImage = false) {
+    let isDataImage = src.startsWith('data:');
+    let mediaType = getMediaType(src);
+    buttons = [];
+    if (permissions.hasPermission('user_star_images') && !isDataImage) {
+        let getMeta = (metadata) => metadata ? (JSON.parse(metadata) || {}) : {};
+        let metaParsed = getMeta(metadata);
+        let isStarred = (e) => {
+            let currentMeta = getMeta(e?.dataset?.metadata);
+            if (Object.keys(currentMeta).length == 0) {
+                currentMeta = metaParsed;
+            }
+            return currentMeta.is_starred;
+        };
+        buttons.push({
+            label: (metadata && metaParsed.is_starred) ? 'Unstar' : 'Star',
+            title: 'Star or unstar this image - starred images get moved to a separate folder and highlighted.',
+            className: (metadata && metaParsed.is_starred) ? ' star-button button-starred-image' : ' star-button',
+            onclick: (e) => {
+                toggleStar(fullsrc, src);
+            }
+        });
+        buttons.push({
+            label: 'Enable Starred',
+            title: 'Marks all selected images as starred if they are not already',
+            onclick: (e) => {
+                // TODO: Pull the reference from the event, not from register context - or register specifically as a bulk handler
+                if (!isStarred(e)) {
+                    toggleStar(fullsrc, src);
+                }
+            },
+            can_multi: true,
+            multi_only: true
+        });
+        buttons.push({
+            label: 'Disable Starred',
+            title: 'Marks all selected images as NOT starred if they are currently starred',
+            onclick: (e) => {
+                if (isStarred(e)) {
+                    toggleStar(fullsrc, src);
+                }
+            },
+            can_multi: true,
+            multi_only: true
+        });
+    }
+    if (metadata) {
+        buttons.push({
+            label: 'Copy Raw Metadata',
+            title: `Copies the raw form of the image's metadata to your clipboard (usually JSON text).`,
+            onclick: (e) => {
+                copyText(metadata);
+                doNoticePopover('Copied!', 'notice-pop-green');
+            }
+        });
+    }
+    if (!isDataImage) {
+        buttons.push({
+            label: 'Copy Path',
+            title: 'Copies the relative file path of this image to your clipboard.',
+            onclick: (e) => {
+                copyText(fullsrc);
+                doNoticePopover('Copied!', 'notice-pop-green');
+            }
+        });
+    }
+    if (permissions.hasPermission('local_image_folder') && !isDataImage) {
+        buttons.push({
+            label: 'Open In Folder',
+            title: 'Opens the folder containing this image in your local PC file explorer.',
+            onclick: (e) => {
+                genericRequest('OpenImageFolder', {'path': fullsrc}, data => {});
+            }
+        });
+    }
+    buttons.push({
+        label: 'Download',
+        title: 'Downloads this image to your PC.',
+        href: escapeHtmlForUrl(src),
+        is_download: true
+    });
+    // TODO: Multi-compat Download (create a zip?)
+    if (permissions.hasPermission('user_delete_image') && !isDataImage) {
+        buttons.push({
+            label: 'Delete',
+            title: 'Deletes this image from the server.',
+            onclick: (e) => {
+                if (!uiImprover.lastShift && getUserSetting('ui.checkifsurebeforedelete', true) && !confirm('Are you sure you want to delete this image?\nHold shift to bypass.')) {
+                    return;
+                }
+                let deleteBehavior = getUserSetting('ui.deleteimagebehavior', 'next');
+                let shifted = deleteBehavior == 'nothing' ? false : shiftToNextImagePreview(deleteBehavior == 'next', imageFullView.isOpen());
+                if (!shifted) {
+                    imageFullView.close();
+                }
+                genericRequest('DeleteImage', {'path': fullsrc}, data => {
+                    if (e) {
+                        e.remove();
+                    }
+                    let historySection = getRequiredElementById('imagehistorybrowser-content');
+                    let div = historySection.querySelector(`.image-block[data-name="${fullsrc}"]`);
+                    if (div) {
+                        div.remove();
+                    }
+                    div = historySection.querySelector(`.image-block[data-name="${src}"]`);
+                    if (div) {
+                        div.remove();
+                    }
+                    let currentImage = currentImageHelper.getCurrentImage();
+                    if (currentImage && currentImage.dataset.src == src) {
+                        setCurrentImage(null);
+                    }
+                    div = getRequiredElementById('current_image_batch').querySelector(`.image-block[data-src="${src}"]`);
+                    if (div) {
+                        removeImageBlockFromBatch(div);
+                    }
+                });
+            },
+            // TODO: Only ask once for the multi-set rather than once per each
+            can_multi: true
+        });
+    }
+    if (mediaType == 'image' || mediaType == 'video') {
+        buttons.push({
+            label: 'Compare',
+            title: 'Compare 2 images or 2 videos',
+            onclick: (e) => {
+                // TODO: Give browsers.js a real "run once with the full selection" bulk handler
+                let items = imageHistoryBrowser.getMultiSelectedFiles().map(f => ({ src: f.data.src, mediaType: getMediaType(f.data.src), metadata: f.data.metadata }));
+                let valid = imageCompareHelper.evaluateSelection(items);
+                if (valid.state != 'ready') {
+                    showError(valid.reason || 'Cannot compare current selection.');
+                    return;
+                }
+                if (imageCompareHelper.isShowingPair(items[0], items[1])) {
+                    return;
+                }
+                imageCompareHelper.reset();
+                imageCompareHelper.showComparison(items[0], items[1]);
+            },
+            can_multi: true,
+            multi_only: true,
+            max_selected: 2
+        });
+    }
+    for (let reg of registeredMediaButtons) {
+        if ((isCurrentImage || reg.showInHistory) && (!reg.mediaTypes || reg.mediaTypes.includes(mediaType))) {
+            buttons.push({
+                label: reg.name,
+                title: reg.title,
+                href: reg.href,
+                is_download: reg.is_download,
+                can_multi: reg.can_multi,
+                multi_only: reg.multi_only,
+                max_selected: reg.max_selected,
+                media_types: reg.mediaTypes,
+                onclick: () => reg.action(src)
+            });
+        }
+    }
+    return buttons;
+}
+
+function describeOutputFile(image) {
+    let buttons = buttonsForImage(image.data.fullsrc, image.data.src, image.data.metadata);
+    let parsedMeta = { is_starred: false };
+    if (image.data.metadata) {
+        let metadata = image.data.metadata;
+        try {
+            metadata = interpretMetadata(image.data.metadata);
+            parsedMeta = JSON.parse(metadata) || parsedMeta;
+        }
+        catch (e) {
+            console.log(`Failed to parse image metadata: ${e}, metadata was ${metadata}`);
+        }
+    }
+    let formattedMetadata = formatMetadata(image.data.metadata);
+    let description = image.data.name + "\n" + formattedMetadata;
+    let name = image.data.name;
+    let allowAnims = localStorage.getItem('image_history_allow_anims') != 'false';
+    let allowAnimToggle = allowAnims ? '' : '&noanim=true';
+    let forceImage = null, forcePreview = null;
+    let extension = image.data.src.split('.').pop();
+    if (extension == 'html') {
+        forceImage = 'imgs/html.jpg';
+        forcePreview = forceImage;
+    }
+    else if (['wav', 'mp3', 'aac', 'ogg', 'flac'].includes(extension)) {
+        forcePreview = 'imgs/audio_placeholder.jpg';
+    }
+    let dragImage = forceImage ?? `${image.data.src}`;
+    let imageSrc = forcePreview ?? `${image.data.src}?preview=true${allowAnimToggle}`;
+    let searchable = `${image.data.name}, ${image.data.metadata}, ${image.data.fullsrc}`;
+    let detail_list = [escapeHtml(image.data.name), formattedMetadata.replaceAll('<br>', '&emsp;')];
+    let aspectRatio = parsedMeta.sui_image_params?.width && parsedMeta.sui_image_params?.height ? parsedMeta.sui_image_params.width / parsedMeta.sui_image_params.height : null;
+    return { name, description, buttons, 'image': imageSrc, 'dragimage': dragImage, className: parsedMeta.is_starred ? 'image-block-starred' : '', searchable, display: name, detail_list, aspectRatio };
+}
+
+function selectOutputInHistory(image, div) {
+    lastHistoryImage = image.data.src;
+    lastHistoryImageDiv = div;
+    let curImg = currentImageHelper.getCurrentImage();
+    if (curImg && curImg.dataset.src == image.data.src) {
+        curImg.dataset.batch_id = 'history';
+        curImg.click();
+        return;
+    }
+    if (image.data.name.endsWith('.html')) {
+        window.open(image.data.src, '_blank');
+    }
+    else {
+        if (!div.dataset.metadata) {
+            div.dataset.metadata = image.data.metadata;
+            div.dataset.src = image.data.src;
+        }
+        setCurrentImage(image.data.src, div.dataset.metadata, 'history');
+    }
+}
+
+let imageHistoryBrowser = new GenPageBrowserClass('image_history', listOutputHistoryFolderAndFiles, 'imagehistorybrowser', 'Thumbnails', describeOutputFile, selectOutputInHistory,
+    `<label for="image_history_sort_by">Sort:</label> <select id="image_history_sort_by"><option>Name</option><option>Date</option></select> <input type="checkbox" id="image_history_sort_reverse"> <label for="image_history_sort_reverse">Reverse</label> &emsp; <input type="checkbox" id="image_history_allow_anims" checked autocomplete="off"> <label for="image_history_allow_anims">Allow Animation</label>`);
+imageHistoryBrowser.allowMultiSelect = true;
+
+function storeImageToHistoryWithCurrentParams(img) {
+    let data = getGenInput();
+    data['image'] = img;
+    delete data['initimage'];
+    delete data['maskimage'];
+    genericRequest('AddImageToHistory', data, res => {
+        mainGenHandler.gotImageResult(res.images[0].image, res.images[0].metadata, '0');
+    });
+}

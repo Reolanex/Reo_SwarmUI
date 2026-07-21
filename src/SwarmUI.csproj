@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Version>0.9.8.1</Version>
+    <NoWarn>CS1998</NoWarn>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>SwarmUI</AssemblyName>
+    <Title>SwarmUI</Title>
+    <Product>SwarmUI</Product>
+    <Authors>Alex "mcmonkey" Goodwin</Authors>
+    <Copyright>Copyright (c) 2024-2026 Alex "mcmonkey" Goodwin</Copyright>
+    <Description>SwarmUI, an AI Image Generation User-Interface</Description>
+    <OutputType>exe</OutputType>
+    <ApplicationIcon>wwwroot/favicon.ico</ApplicationIcon>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Extensions/**" />
+    <Content Remove="**/*.json" />
+    <None Remove="**" />
+  </ItemGroup>
+
+  <Import Project="SwarmUI.deps.props" />
+</Project>
